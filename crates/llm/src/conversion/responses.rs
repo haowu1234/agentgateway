@@ -792,6 +792,11 @@ pub mod from_messages {
 						cache_control: None,
 					});
 				},
+				responses::OutputItem::Reasoning(_) => {
+					tracing::warn!(
+						"Skipping unsupported Responses reasoning output during messages translation"
+					);
+				},
 				_ => {
 					return unsupported("responses output item cannot be represented by messages");
 				},

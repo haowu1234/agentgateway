@@ -399,7 +399,7 @@ fn response_conversion_golden() {
 			conversion::completions::from_messages::translate_response(&i)
 		});
 	}
-	for name in ["basic", "tool"] {
+	for name in ["basic", "reasoning", "tool"] {
 		let path = format!("response/responses/{name}.json");
 		test_response("responses-messages", &path, |i| {
 			conversion::responses::from_messages::translate_response(&i)
