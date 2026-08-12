@@ -1439,6 +1439,10 @@ pub mod from_messages {
 							error.message
 						);
 					},
+					// Intermediate progress event; no block state change needed.
+					responses::ResponseStreamEvent::ResponseInProgress(_) => {},
+					// Text finalization is handled by ResponseContentPartDone.
+					responses::ResponseStreamEvent::ResponseOutputTextDone(_) => {},
 				},
 			}
 			events
