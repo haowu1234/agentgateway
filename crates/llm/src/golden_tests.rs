@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use agent_core::strng;
 use bytes::Bytes;
+use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -100,6 +101,38 @@ fn test_response(
 			".response.output.*.id" => "[id]",
 			".response.created" => "[date]",
 		});
+	});
+}
+
+async fn test_stream(provider: &str, relative_path: &str) {
+	let input_path = fixture_path(relative_path);
+	let provider_bytes = fs::read(&input_path).expect("failed to read stream input file");
+	let input_str = String::from_utf8_lossy(&provider_bytes).to_string();
+
+	let output = conversion::responses::from_messages::translate_stream(
+		axum_core::body::Body::from(provider_bytes),
+		1024 * 1024,
+		StreamingUsageGuard::default(),
+		crate::LogContentFields {
+			completion: true,
+			tool_calls: true,
+		},
+	)
+	.collect()
+	.await
+	.unwrap()
+	.to_bytes();
+	let output_str = String::from_utf8_lossy(&output).to_string();
+	let (snapshot_path, snapshot_name) = snapshot_path_and_name(relative_path, provider);
+
+	insta::with_settings!({
+		info => &input_str,
+		description => input_path.to_string_lossy().to_string(),
+		omit_expression => true,
+		prepend_module_to_snapshot => false,
+		snapshot_path => snapshot_path,
+	}, {
+		insta::assert_snapshot!(snapshot_name, output_str);
 	});
 }
 
@@ -545,76 +578,54 @@ data: [DONE]
 
 #[tokio::test]
 async fn responses_to_messages_stream_translates_text_tool_and_usage() {
-	use http_body_util::BodyExt;
-
-	let input = fs::read_to_string(fixture_path("response/responses/stream.json"))
-		.expect("failed to read input fixture");
-	let output = conversion::responses::from_messages::translate_stream(
-		axum_core::body::Body::from(input),
-		1024 * 1024,
-		StreamingUsageGuard::default(),
-		crate::LogContentFields {
-			completion: true,
-			tool_calls: true,
-		},
+	test_stream(
+		"responses-messages-streaming",
+		"response/responses/stream.json",
 	)
-	.collect()
-	.await
-	.unwrap()
-	.to_bytes();
+	.await;
+}
 
-	let events = String::from_utf8(output.to_vec())
-		.unwrap()
-		.lines()
-		.filter_map(|line| line.strip_prefix("data: "))
-		.filter(|data| *data != "[DONE]")
-		.filter_map(|data| serde_json::from_str::<Value>(data).ok())
-		.collect::<Vec<_>>();
-
-	assert!(
-		events.iter().any(|event| event["type"] == "message_start"),
-		"missing message_start: {events:#?}"
-	);
-	assert!(events.iter().any(|event| {
-		event["type"] == "content_block_delta"
-			&& event["delta"]["type"] == "text_delta"
-			&& event["delta"]["text"] == "Hello"
-	}));
-	assert!(events.iter().any(|event| {
-		event["type"] == "content_block_delta"
-			&& event["delta"]["type"] == "input_json_delta"
-			&& event["delta"]["partial_json"] == "{\"loc"
-	}));
-	let delta = events
-		.iter()
-		.find(|event| event["type"] == "message_delta")
-		.expect("missing message_delta");
-	assert_eq!(delta["delta"]["stop_reason"], "tool_use");
-	assert_eq!(
-		delta["usage"],
-		json!({
-			"input_tokens": 12,
-			"output_tokens": 8,
-		})
-	);
-	assert!(
-		events.iter().any(|event| event["type"] == "message_stop"),
-		"missing message_stop: {events:#?}"
-	);
+#[tokio::test]
+async fn responses_to_messages_stream_translates_image() {
+	test_stream(
+		"responses-messages-streaming",
+		"response/responses/stream-image.json",
+	)
+	.await;
 }
 
 #[test]
 fn messages_to_responses_rejects_unsupported_features() {
-	for path in ["requests/messages/reasoning_replay.json"] {
-		let input_str = fs::read_to_string(fixture_path(path)).expect("failed to read fixture");
-		let input: types::messages::Request =
-			serde_json::from_str(&input_str).expect("failed to parse fixture");
-		let err = conversion::responses::from_messages::translate(&input).unwrap_err();
-		assert!(
-			matches!(err, AIError::UnsupportedConversion(_)),
-			"expected UnsupportedConversion for {path}, got {err:?}"
-		);
-	}
+	let path = "requests/messages/reasoning_replay.json";
+	let input_str = fs::read_to_string(fixture_path(path)).expect("failed to read fixture");
+	let input: types::messages::Request =
+		serde_json::from_str(&input_str).expect("failed to parse fixture");
+	let err = conversion::responses::from_messages::translate(&input).unwrap_err();
+	assert!(
+		matches!(err, AIError::UnsupportedConversion(_)),
+		"expected UnsupportedConversion for {path}, got {err:?}"
+	);
+}
+
+#[test]
+fn messages_to_responses_accepts_and_drops_unrepresentable_fields() {
+	let input: types::messages::Request = serde_json::from_value(json!({
+		"model": "claude-sonnet-4-20250514",
+		"max_tokens": 1024,
+		"stop_sequences": ["</end>", "\n\nHuman:"],
+		"top_k": 40,
+		"messages": [{
+			"role": "user",
+			"content": [{"type": "text", "text": "hello"}]
+		}]
+	}))
+	.expect("failed to parse request");
+	let body = conversion::responses::from_messages::translate(&input)
+		.expect("stop_sequences/top_k should be accepted and dropped");
+	let body: Value = serde_json::from_slice(&body).expect("translated request should be JSON");
+	assert!(body.get("stop").is_none());
+	assert!(body.get("top_k").is_none());
+	assert_eq!(body["input"][0]["content"][0]["text"], "hello");
 }
 
 #[test]

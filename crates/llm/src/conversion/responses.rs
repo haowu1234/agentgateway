@@ -179,12 +179,9 @@ pub mod from_messages {
 			output_config,
 		} = req;
 
-		if !stop_sequences.is_empty() {
-			return unsupported("messages stop_sequences cannot be represented by responses");
-		}
-		if top_k.is_some() {
-			return unsupported("messages top_k cannot be represented by responses");
-		}
+		// Responses has no direct stop_sequences/top_k equivalent; these are
+		// accepted and dropped rather than failing the conversion (see #2662).
+		let _ = (stop_sequences, top_k);
 
 		let (instructions, mut input) = translate_system_prompt(system)?;
 		let mut rest = Map::new();
@@ -194,7 +191,10 @@ pub mod from_messages {
 
 		let output_config = output_config.unwrap_or_default();
 		if let Some(reasoning) = translate_reasoning(thinking, output_config.effort)? {
-			rest.insert("reasoning".to_string(), reasoning);
+			rest.insert(
+				"reasoning".to_string(),
+				serde_json::to_value(reasoning).map_err(AIError::RequestMarshal)?,
+			);
 		}
 		if let Some(text) = translate_output_format(output_config.format) {
 			rest.insert("text".to_string(), text);
@@ -305,14 +305,14 @@ pub mod from_messages {
 	fn translate_reasoning(
 		thinking: Option<messages::ThinkingInput>,
 		effort: Option<messages::ThinkingEffort>,
-	) -> Result<Option<Value>, AIError> {
+	) -> Result<Option<responses::Reasoning>, AIError> {
 		match thinking {
-			Some(messages::ThinkingInput::Adaptive {}) => {
-				let effort = translate_effort(effort);
-				Ok(Some(json!({
-					"effort": effort,
-				})))
-			},
+			Some(messages::ThinkingInput::Adaptive {}) => Ok(Some(responses::Reasoning {
+				context: None,
+				effort: translate_effort(effort),
+				mode: None,
+				summary: None,
+			})),
 			Some(messages::ThinkingInput::Disabled {}) => {
 				if effort.is_some() {
 					unsupported("messages output_config.effort requires adaptive thinking")
@@ -320,9 +320,12 @@ pub mod from_messages {
 					Ok(None)
 				}
 			},
-			Some(messages::ThinkingInput::Enabled { .. }) => Ok(Some(json!({
-				"effort": translate_effort(effort),
-			}))),
+			Some(messages::ThinkingInput::Enabled { .. }) => Ok(Some(responses::Reasoning {
+				context: None,
+				effort: translate_effort(effort),
+				mode: None,
+				summary: None,
+			})),
 			None => {
 				if effort.is_some() {
 					unsupported("messages output_config.effort requires adaptive thinking")
@@ -333,15 +336,17 @@ pub mod from_messages {
 		}
 	}
 
-	fn translate_effort(effort: Option<messages::ThinkingEffort>) -> &'static str {
-		match effort {
-			Some(messages::ThinkingEffort::Low) => "low",
-			Some(messages::ThinkingEffort::Medium) => "medium",
-			Some(messages::ThinkingEffort::High) => "high",
-			Some(messages::ThinkingEffort::Xhigh) => "xhigh",
-			Some(messages::ThinkingEffort::Max) => "max",
-			None => "high",
-		}
+	fn translate_effort(
+		effort: Option<messages::ThinkingEffort>,
+	) -> Option<responses::ReasoningEffort> {
+		Some(match effort {
+			Some(messages::ThinkingEffort::Low) => responses::ReasoningEffort::Low,
+			Some(messages::ThinkingEffort::Medium) => responses::ReasoningEffort::Medium,
+			Some(messages::ThinkingEffort::High) => responses::ReasoningEffort::High,
+			Some(messages::ThinkingEffort::Xhigh) => responses::ReasoningEffort::Xhigh,
+			Some(messages::ThinkingEffort::Max) => responses::ReasoningEffort::Max,
+			None => responses::ReasoningEffort::High,
+		})
 	}
 
 	fn translate_output_format(format: Option<messages::OutputFormat>) -> Option<Value> {
@@ -1539,76 +1544,35 @@ pub mod from_messages {
 	}
 
 	fn validate_raw_request(req: &types::messages::Request) -> Result<(), AIError> {
-		validate_allowed_keys(
-			&req.rest,
-			&[
-				"stop_sequences",
-				"top_k",
-				"tools",
-				"tool_choice",
-				"metadata",
-				"thinking",
-				"output_config",
-				"context_management",
-			],
-			"messages request field",
-		)?;
+		// Validate only the fields we actually translate. Unknown request-level
+		// fields are accepted and dropped rather than failing the conversion
+		// (see #2662: "tune down validation very very very heavily").
+		let _ = &req.rest;
 		if let Some(system) = &req.system {
 			match system {
 				types::messages::TextBlock::Text(_) => {},
 				types::messages::TextBlock::Array(parts) => {
 					for part in parts {
 						match part {
-							types::messages::TextPart::Text { rest, .. } => {
-								validate_allowed_keys(rest, &["cache_control"], "messages system text field")?
-							},
-							types::messages::TextPart::Unknown(_) => {
-								return unsupported(
-									"messages unknown system block cannot be represented by responses",
-								);
-							},
+							types::messages::TextPart::Text { .. } => {},
+							types::messages::TextPart::Unknown(_) => {},
 						}
 					}
 				},
 			}
 		}
 		for message in &req.messages {
-			validate_allowed_keys(&message.rest, &[], "messages message field")?;
+			let _ = &message.rest;
 			if let Some(types::messages::ContentBlock::Array(parts)) = &message.content {
 				for part in parts {
 					match part {
-						types::messages::ContentPart::Text { rest, .. } => {
-							validate_allowed_keys(rest, &["cache_control", "citations"], "messages text field")?
-						},
+						types::messages::ContentPart::Text { .. } => {},
 						types::messages::ContentPart::Unknown(_) => {},
 					}
 				}
 			}
 		}
 		Ok(())
-	}
-
-	fn validate_allowed_keys(
-		value: &Value,
-		allowed: &[&str],
-		context: &'static str,
-	) -> Result<(), AIError> {
-		match value {
-			Value::Null => Ok(()),
-			Value::Object(map) => {
-				for key in map.keys() {
-					if !allowed.contains(&key.as_str()) {
-						return Err(AIError::UnsupportedConversion(strng::format!(
-							"{context} {key:?} cannot be represented by responses"
-						)));
-					}
-				}
-				Ok(())
-			},
-			_ => Err(AIError::UnsupportedConversion(strng::format!(
-				"{context} rest must be an object"
-			))),
-		}
 	}
 
 	fn reject_option<T>(value: &Option<T>, reason: &'static str) -> Result<(), AIError> {
