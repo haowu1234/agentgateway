@@ -605,10 +605,7 @@ async fn responses_to_messages_stream_translates_text_tool_and_usage() {
 
 #[test]
 fn messages_to_responses_rejects_unsupported_features() {
-	for path in [
-		"requests/messages/cache_control.json",
-		"requests/messages/reasoning_replay.json",
-	] {
+	for path in ["requests/messages/reasoning_replay.json"] {
 		let input_str = fs::read_to_string(fixture_path(path)).expect("failed to read fixture");
 		let input: types::messages::Request =
 			serde_json::from_str(&input_str).expect("failed to parse fixture");
@@ -618,6 +615,50 @@ fn messages_to_responses_rejects_unsupported_features() {
 			"expected UnsupportedConversion for {path}, got {err:?}"
 		);
 	}
+}
+
+#[test]
+fn messages_to_responses_maps_anthropic_runtime_features() {
+	let input: types::messages::Request = serde_json::from_value(json!({
+		"model": "claude-sonnet-4-20250514",
+		"max_tokens": 1024,
+		"context_management": {
+			"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+		},
+		"thinking": {"type": "enabled", "budget_tokens": 2048},
+		"system": [
+			{"type": "text", "text": "stable instructions"},
+			{
+				"type": "text",
+				"text": "cached instructions",
+				"cache_control": {"type": "ephemeral"}
+			}
+		],
+		"messages": [{
+			"role": "user",
+			"content": [{
+				"type": "text",
+				"text": "hello",
+				"cache_control": {"type": "ephemeral"}
+			}]
+		}]
+	}))
+	.expect("failed to parse request");
+	let body = conversion::responses::from_messages::translate(&input)
+		.expect("runtime features should translate");
+	let body: Value = serde_json::from_slice(&body).expect("translated request should be JSON");
+
+	assert!(body.get("context_management").is_none());
+	assert_eq!(body["reasoning"]["effort"], "high");
+	assert_eq!(body["input"][0]["role"], "system");
+	assert_eq!(
+		body["input"][0]["content"][1]["prompt_cache_breakpoint"]["mode"],
+		"explicit"
+	);
+	assert_eq!(
+		body["input"][1]["content"][0]["prompt_cache_breakpoint"]["mode"],
+		"explicit"
+	);
 }
 
 #[test]
