@@ -629,6 +629,30 @@ fn messages_to_responses_accepts_and_drops_unrepresentable_fields() {
 }
 
 #[test]
+fn messages_to_responses_maps_tool_result_is_error_to_incomplete() {
+	let input_str = fs::read_to_string(fixture_path("requests/messages/tool_result_error.json"))
+		.expect("failed to read fixture");
+	let input: types::messages::Request =
+		serde_json::from_str(&input_str).expect("failed to parse fixture");
+	let body = conversion::responses::from_messages::translate(&input)
+		.expect("tool_result is_error should be mapped, not rejected");
+	let body: Value = serde_json::from_slice(&body).expect("translated request should be JSON");
+	let call_outputs = body["input"]
+		.as_array()
+		.expect("input should be an array")
+		.iter()
+		.filter(|item| item["type"] == "function_call_output")
+		.collect::<Vec<_>>();
+	assert_eq!(
+		call_outputs.len(),
+		1,
+		"expected one function_call_output: {body}"
+	);
+	assert_eq!(call_outputs[0]["call_id"], "toolu_01");
+	assert_eq!(call_outputs[0]["status"], "incomplete");
+}
+
+#[test]
 fn messages_to_responses_maps_anthropic_runtime_features() {
 	let input: types::messages::Request = serde_json::from_value(json!({
 		"model": "claude-sonnet-4-20250514",

@@ -450,15 +450,17 @@ pub mod from_messages {
 					is_error,
 				} => {
 					flush_input_message("user", &mut parts, out);
-					if is_error.unwrap_or_default() {
-						return unsupported("messages tool_result is_error cannot be represented by responses");
-					}
+					let status = if is_error.unwrap_or_default() {
+						"incomplete"
+					} else {
+						"completed"
+					};
 					let output = translate_tool_result_content(content, cache_control)?;
 					out.push(types::responses::RawInputItem::from_value(json!({
 						"type": "function_call_output",
 						"call_id": tool_use_id,
 						"output": output,
-						"status": "completed",
+						"status": status,
 					})));
 				},
 				messages::ContentBlock::Document(_)
